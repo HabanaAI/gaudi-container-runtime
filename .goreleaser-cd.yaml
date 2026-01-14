@@ -1,0 +1,262 @@
+# This is an example .goreleaser.yml file with some sensible defaults.
+# Make sure to check the documentation at https://goreleaser.com
+
+# The lines below are called `modelines`. See `:help modeline`
+# Feel free to remove those if you don't want/need to use them.
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 2
+
+project_name: habana-container-runtime
+
+before:
+  hooks:
+    # You may remove this if you don't use go modules.
+    - rm -rf licenses
+    - go mod tidy
+    - go run -mod=mod github.com/google/go-licenses save ./... --save_path=licenses
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    asmflags:
+      - all=-spectre=all
+    gcflags:
+      - all=-spectre=all
+      - -N
+      - -l
+    ldflags:
+      - all=-s
+      - -w
+    goos:
+      - linux
+    goarch:
+      - amd64
+    binary: habana-container-runtime
+    flags:
+      - -buildvcs=false
+      - -trimpath
+      - -mod=readonly
+    main: ./cmd/habana-container-runtime/
+    id: habana-container-runtime
+
+  - env:
+      - CGO_ENABLED=0
+    asmflags:
+      - all=-spectre=all
+    gcflags:
+      - all=-spectre=all
+      - -N
+      - -l
+    ldflags:
+      - all=-s
+      - -w
+    goos:
+      - linux
+    goarch:
+      - amd64
+    binary: habana-container-hook
+    flags:
+      - -buildvcs=false
+      - -trimpath
+      - -mod=readonly
+    main: ./cmd/habana-container-runtime-hook/
+    id: habana-container-hook
+
+  - env:
+      - CGO_ENABLED=0
+    asmflags:
+      - all=-spectre=all
+    gcflags:
+      - all=-spectre=all
+      - -N
+      - -l
+    ldflags:
+      - all=-s
+      - -w
+    flags:
+      - -buildvcs=false
+      - -trimpath
+      - -mod=readonly
+    goos:
+      - linux
+    goarch:
+      - amd64
+    binary: habana-container-cli
+    main: ./cmd/habana-container-cli/
+    id: habana-container-cli
+
+  - env:
+      - CGO_ENABLED=0
+    asmflags:
+      - all=-spectre=all
+    gcflags:
+      - all=-spectre=all
+      - -N
+      - -l
+    ldflags:
+      - all=-s
+      - -w
+    flags:
+      - -buildvcs=false
+      - -trimpath
+      - -mod=readonly
+    goos:
+      - linux
+    goarch:
+      - amd64
+    binary: habana-container-toolkit
+    main: ./cmd/habana-container-toolkit/
+    id: habana-container-toolkit
+
+archives:
+  - formats: [ 'tar.gz' ]
+    # this name template makes the OS and Arch compatible with the results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- with .Arm }}v{{ . }}{{ end }}
+      {{- with .Mips }}_{{ . }}{{ end }}
+      {{- if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        formats: [ 'zip' ]
+    files:
+      - LICENSE
+      - licenses/**
+
+nfpms:
+  - id: habana-container-runtime
+    package_name: habanalabs-container-runtime
+    homepage: https://github.com/HabanaAI/habana-container-runtime
+    vendor: Intel Corporation
+    license: "Apache-2.0"
+    maintainer: Lukasz Wencel <lukasz.wencel@intel.com>
+    section: misc
+    release: '{{ .Env.RELEASE_BUILD_ID }}'
+    description: |
+      Gaudi container runtime
+        Provides a modified version of runc allowing users to run Intel® Gaudi® AI Accelerator enabled containers.
+    formats:
+      - deb
+      - rpm
+    file_name_template: >-
+      {{ .PackageName }}-{{ .Tag }}-{{ .Release }}.
+      {{- if and (eq .ConventionalExtension ".rpm") (eq .Arch "amd64") }}x86_64{{else}}{{.Arch}}{{end}}
+      {{- if not (eq .Amd64 "v1") }}{{ .Amd64 }}{{ end }}
+    priority: optional
+    contents:
+    - src: packaging/config.toml
+      dst: /etc/habana-container-runtime/config.toml
+    - src: packaging/oci-habana-hook
+      dst: /usr/libexec/oci/hooks.d/oci-habana-hook
+    - src: packaging/oci-habana-hook.json
+      dst: /usr/share/containers/oci/hooks.d/oci-habana-hook.json
+    - src: ./LICENSE
+      dst: /usr/share/doc/habana-container-runtime/copyright
+      file_info:
+        owner: root
+        group: root
+        mode: 0644
+    - src: ./licenses/
+      dst: /usr/share/doc/habana-container-runtime/licenses
+      type: dir
+      file_info:
+        owner: root
+        group: root
+        mode: 0644
+    deb:
+      lintian_overrides:
+        - new-package-should-close-itp-bug
+        - binary-without-manpage
+        - description-is-pkg-name
+      compression: xz
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - Merge pull request
+      - Merge branch
+      - go mod tidy
+
+snapshot:
+  version_template: '{{ .Version }}'
+
+# dockers_v2:
+#   - id: "{{ .ProjectName }}"
+#     dockerfile: packaging/Dockerfile
+#     ids:
+#       - habana-container-runtime
+#       - habana-container-hook
+#       - habana-container-cli
+#       - habana-container-toolkit
+#     platforms:
+#       - linux/amd64
+#     images:
+#       - "{{ .ProjectName }}"
+#     tags:
+#       - "{{ .Version }}"
+#       - "{{ .Tag}}"
+#     extra_files:
+#       - packaging/config.toml
+#       - packaging/oci-habana-hook
+#       - packaging/oci-habana-hook.json
+#       - LICENSE
+#       - licenses
+#     labels:
+#       org.opencontainers.image.vendor: "Intel Corp."
+#       org.opencontainers.image.title: "Habana Container Runtime"
+#       org.opencontainers.image.description: "Provides a container runtime allowing users to run Intel® Gaudi® AI Accelerator enabled containers."
+#       org.opencontainers.image.version: "{{ .Version }}"
+#       org.opencontainers.image.created: "{{ .Date }}"
+#       org.opencontainers.image.source: "https://github.com/HabanaAI/gaudi-container-runtime"
+#       org.opencontainers.image.licenses: "Apache-2.0"
+#     build_args:
+#       HTTP_PROXY: "{{ .Env.HTTP_PROXY }}"
+#       HTTPS_PROXY: "{{ .Env.HTTPS_PROXY }}"
+#       NO_PROXY: "{{ .Env.NO_PROXY }}"
+
+dockers:
+  - id: "{{ .ProjectName }}"
+    goos: linux
+    goarch: amd64
+    ids:
+      - habana-container-runtime
+      - habana-container-hook
+      - habana-container-cli
+      - habana-container-toolkit
+    image_templates:
+      - "{{ .ProjectName }}:{{ .Version }}"
+    use: docker
+    skip_push: true
+    dockerfile: packaging/Dockerfile
+    build_flag_templates:
+      - "--label=org.opencontainers.image.vendor='Intel Corp.'"
+      - "--label=org.opencontainers.image.title='Habana Container Runtime'"
+      - "--label=org.opencontainers.image.description='Provides a container runtime allowing users to run Intel® Gaudi® AI Accelerator enabled containers.'"
+      - "--label=org.opencontainers.image.version='{{ .Version }}'"
+      - "--label=org.opencontainers.image.created='{{ .Date }}'"
+      - "--label=org.opencontainers.image.source='https://github.com/HabanaAI/gaudi-bmc-exporter'"
+      - "--label=org.opencontainers.image.licenses='Apache-2.0'"
+      - "--build-arg=HTTP_PROXY={{.Env.HTTP_PROXY}}"
+      - "--build-arg=HTTPS_PROXY={{.Env.HTTPS_PROXY}}"
+      - "--build-arg=NO_PROXY={{.Env.NO_PROXY}}"
+    extra_files:
+      - packaging/config.toml
+      - packaging/oci-habana-hook
+      - packaging/oci-habana-hook.json
+      - LICENSE
+      - licenses

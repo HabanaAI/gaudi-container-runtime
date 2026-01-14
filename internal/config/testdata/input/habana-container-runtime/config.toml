@@ -1,0 +1,13 @@
+mount_accelerators = true
+mount_uverbs = false
+
+[network-layer-routes]
+path = "/tmp/testdata.json"
+
+[habana-container-runtime]
+binaries-dir = "/usr/local/bin"
+visible_devices_all_as_default = false
+mode = "legacy"
+log_file = "/tmp/runtime-test"
+systemd_cgroup = true
+log_level = "debug"

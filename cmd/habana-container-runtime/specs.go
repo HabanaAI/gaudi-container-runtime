@@ -1,0 +1,399 @@
+/*
+ * Copyright (c) 2022, HabanaLabs Ltd.  All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+
+	"github.com/HabanaAI/habana-container-runtime/internal/config"
+	"github.com/HabanaAI/habana-container-runtime/internal/discover"
+	"github.com/opencontainers/runtime-spec/specs-go"
+)
+
+var accelModuleId = discover.AcceleratorModuleID
+var accelPciId = discover.AcceleratorPciID
+
+func loadSpecs(bundleConfigFile string) (*specs.Spec, error) {
+	jsonFile, err := os.OpenFile(filepath.Clean(bundleConfigFile), os.O_RDWR, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("opening OCI spec file: %w", err)
+	}
+	defer jsonFile.Close()
+
+	var spec specs.Spec
+	err = json.NewDecoder(jsonFile).Decode(&spec)
+	if err != nil {
+		return nil, fmt.Errorf("reading OCI spec file: %w", err)
+	}
+
+	return &spec, nil
+}
+
+func saveSpecs(bundleConfigFile string, spec *specs.Spec) error {
+	jsonFile, err := os.OpenFile(filepath.Clean(bundleConfigFile), os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("opening OCI spec file: %w", err)
+	}
+	defer jsonFile.Close()
+
+	jsonOutput, err := json.Marshal(spec)
+	if err != nil {
+		return fmt.Errorf("marshaling OCI spec: %w", err)
+	}
+
+	_, err = jsonFile.WriteAt(jsonOutput, 0)
+	if err != nil {
+		return fmt.Errorf("writing to OCI spec file: %w", err)
+	}
+	return nil
+}
+
+func addPrestartHook(logger *slog.Logger, spec *specs.Spec, cfg *config.Config) error {
+	// path, err := execLookPath("habana-container-runtime-hook")
+	path, err := hookBinaryPath(cfg)
+	if err != nil {
+		path = hookDefaultFilePath
+		_, err = os.Stat(path)
+		if err != nil {
+			return err
+		}
+	}
+	logger.Info("Prestart hook path", "path", path)
+
+	args := []string{path}
+	if spec.Hooks == nil {
+		spec.Hooks = &specs.Hooks{}
+	} else if len(spec.Hooks.Prestart) != 0 {
+		for _, hook := range spec.Hooks.Prestart {
+			if !strings.Contains(hook.Path, "habana-container-hook") {
+				continue
+			}
+			logger.Info("Existing habana prestart hook in OCI spec file")
+			return nil
+		}
+	}
+
+	spec.Hooks.Prestart = append(spec.Hooks.Prestart, specs.Hook{
+		Path: path,
+		Args: append(args, "prestart"),
+	})
+
+	logger.Info("Prestart hook added, executing runc")
+	return nil
+}
+
+func addCreateRuntimeHook(logger *slog.Logger, spec *specs.Spec, cfg *config.Config) error {
+	path, err := hookBinaryPath(cfg)
+	if err != nil {
+		path = hookDefaultFilePath
+		_, err = os.Stat(path)
+		if err != nil {
+			return err
+		}
+	}
+	logger.Info("hook binary path", "path", path)
+
+	args := []string{path}
+	if spec.Hooks == nil {
+		spec.Hooks = &specs.Hooks{}
+	} else if len(spec.Hooks.CreateRuntime) != 0 {
+		for _, hook := range spec.Hooks.CreateRuntime {
+			if !strings.Contains(hook.Path, "habana-container-hook") {
+				continue
+			}
+			logger.Info("Existing habana createRuntime hook in OCI spec file")
+			return nil
+		}
+	}
+
+	spec.Hooks.CreateRuntime = append(spec.Hooks.CreateRuntime, specs.Hook{
+		Path: path,
+		Args: append(args, "createRuntime"),
+	})
+
+	logger.Info("createRuntime hook added, executing runc")
+	return nil
+}
+
+func addAcceleratorDevices(logger *slog.Logger, spec *specs.Spec, requestedDevs []string) error {
+	logger.Debug("Discovering accelerators")
+
+	// Prepare devices in OCI format
+	var devs []*discover.DevInfo
+	for _, reqDev := range requestedDevs {
+		for _, d := range discover.AcceleratorDevices() {
+			if d[len(d)-1:] != reqDev {
+				continue
+			}
+			logger.Info("Adding accelerator device", "path", d)
+			i, err := discover.DeviceInfo(d)
+			if err != nil {
+				return err
+			}
+			devs = append(devs, i)
+		}
+	}
+	addDevicesToSpec(logger, spec, devs)
+	addAllowList(logger, spec, devs)
+
+	return nil
+}
+
+func addAcceleratorModuleIDs(logger *slog.Logger, spec *specs.Spec, requestedDevs []string) error {
+	// Extract module id for HABANA_VISIBLE_MODULES environment variables
+	modulesIDs := make([]string, 0, len(requestedDevs))
+	for _, acc := range requestedDevs {
+		id, err := discover.AcceleratorModuleID(acc)
+		if err != nil {
+			logger.Debug("discoring modules", "error", err)
+			return err
+		}
+		modulesIDs = append(modulesIDs, id)
+	}
+	sort.Strings(modulesIDs)
+
+	addEnvVar(spec, EnvHLVisibleModules, strings.Join(modulesIDs, ","))
+
+	logger.Debug("Exposed module ids", "module_ids", modulesIDs)
+
+	return nil
+}
+
+func addUverbsDevices(logger *slog.Logger, spec *specs.Spec) error {
+	logger.Debug("Discovering uverbs")
+
+	var devs []*discover.DevInfo
+	hlibDevices := filterDevicesByENV(spec, discover.InfinibandDevices())
+	for _, hlib := range hlibDevices {
+		logger.Debug("Getting uverbs device for hlib", "hlib", hlib)
+
+		// Extract uverb from hlib device
+		uverbs, err := osReadDir(fmt.Sprintf("%s/device/infiniband_verbs", hlib))
+		if err != nil {
+			logger.Error(fmt.Sprintf("Reading hlib directory: %v", err))
+			continue
+		}
+		if len(uverbs) == 0 {
+			logger.Debug("No uverbs devices found for devices", "device", hlib)
+			continue
+		}
+		uverbDev := fmt.Sprintf("/dev/infiniband/%s", uverbs[0].Name())
+
+		// Prepare devices in OCI format
+		logger.Info("Adding uverb device", "path", uverbDev)
+		i, err := discover.DeviceInfo(uverbDev)
+		if err != nil {
+			return err
+		}
+		logger.Info("Adding uverb device", "path", uverbDev)
+		devs = append(devs, i)
+	}
+
+	addDevicesToSpec(logger, spec, devs)
+	addAllowList(logger, spec, devs)
+
+	return nil
+}
+
+func getRequestedDevicesFromEnv(envArgName string, env []string) []string {
+	// Get requested devices from environment variable
+	var requestedDevs []string
+	for _, ev := range env {
+		if strings.HasPrefix(ev, envArgName) {
+			_, values, found := strings.Cut(ev, "=")
+			if found {
+				if values == "all" {
+					return []string{}
+				} else {
+					requestedDevs = strings.Split(values, ",")
+				}
+			}
+			break
+		}
+	}
+
+	return requestedDevs
+}
+
+func filterDevicesByENV(spec *specs.Spec, devices []string) []string {
+	// Handle case when user provided environment variable HABANA_VISIBLE_DEVICES
+	requestedDevs := getRequestedDevicesFromEnv(EnvHLVisibleDevices, spec.Process.Env)
+	useModuleID := false
+	usePciID := false
+
+	// If user provided HABANA_VISIBLE_MODULES, we need to use module IDs
+	if len(requestedDevs) == 0 {
+		requestedDevs = getRequestedDevicesFromEnv(EnvHLVisibleModules, spec.Process.Env)
+		if len(requestedDevs) > 0 {
+			useModuleID = true
+		}
+	}
+
+	// Case when user provided HABANA_VISIBLE_PCI_BUS_IDS
+	if len(requestedDevs) == 0 {
+		requestedDevs = getRequestedDevicesFromEnv(EnvHLVisiblePciBusIds, spec.Process.Env)
+		if len(requestedDevs) > 0 {
+			usePciID = true
+		}
+	}
+
+	// Case when alwaysMatch is true, and user didn't provide the environment variable
+	if len(requestedDevs) == 0 {
+		return devices
+	}
+
+	var filteredDevices []string
+	for _, dev := range devices {
+		devID := string(dev[len(dev)-1])
+
+		if useModuleID {
+			var err error
+			devID, err = accelModuleId(devID)
+			if err != nil {
+				panic(err)
+			}
+		}
+
+		if usePciID {
+			var err error
+			devID, err = accelPciId(devID)
+			if err != nil {
+				panic(err)
+			}
+		}
+
+		if slices.Contains(requestedDevs, devID) {
+			filteredDevices = append(filteredDevices, dev)
+		}
+	}
+
+	return filteredDevices
+}
+
+// addDevicesToSpec adds list of devices nodes to be created for container.
+func addDevicesToSpec(logger *slog.Logger, spec *specs.Spec, devices []*discover.DevInfo) {
+	logger.Debug("Mounting devices in spec")
+	current := make(map[string]struct{})
+
+	for _, dev := range spec.Linux.Devices {
+		current[dev.Path] = struct{}{}
+	}
+
+	var devicesToAdd []specs.LinuxDevice
+	for _, hlDevice := range devices {
+		if _, ok := current[hlDevice.Path]; ok {
+			continue
+		}
+
+		zeroID := uint32(0)
+		devicesToAdd = append(devicesToAdd, specs.LinuxDevice{
+			Type:     "c",
+			Major:    int64(hlDevice.Major),
+			Minor:    int64(hlDevice.Minor),
+			FileMode: &hlDevice.FileMode,
+			Path:     hlDevice.Path,
+			GID:      &zeroID,
+			UID:      &zeroID,
+		})
+		logger.Debug("Added device to spec", "path", hlDevice.Path)
+	}
+
+	spec.Linux.Devices = append(spec.Linux.Devices, devicesToAdd...)
+}
+
+// addAllowList modifies the Linux devices allow list to cgroup rules.
+func addAllowList(logger *slog.Logger, spec *specs.Spec, devices []*discover.DevInfo) {
+	logger.Debug("Adding devices to allow list")
+
+	current := make(map[string]bool)
+	for _, dev := range spec.Linux.Resources.Devices {
+		if dev.Major != nil && dev.Minor != nil {
+			current[fmt.Sprintf("%d-%d", *dev.Major, *dev.Minor)] = true
+		}
+	}
+
+	var devsToAdd []specs.LinuxDeviceCgroup
+	for _, hldev := range devices {
+		k := fmt.Sprintf("%d-%d", hldev.Major, hldev.Minor)
+		if _, ok := current[k]; !ok {
+			major := int64(hldev.Major)
+			minor := int64(hldev.Minor)
+			devsToAdd = append(devsToAdd, specs.LinuxDeviceCgroup{
+				Allow:  true,
+				Type:   "c",
+				Major:  &major,
+				Minor:  &minor,
+				Access: "rwm",
+			})
+			logger.Debug("Added device to allow list", "major", hldev.Major, "minor", hldev.Minor)
+		}
+	}
+
+	// modify spec
+	spec.Linux.Resources.Devices = append(spec.Linux.Resources.Devices, devsToAdd...)
+}
+
+func addEnvVar(spec *specs.Spec, key string, value string) {
+	spec.Process.Env = append(spec.Process.Env, fmt.Sprintf("%s=%v", key, value))
+}
+
+// hookBinaryPath looks for the binary in the following locations by order:
+//
+// 1. $PATH environment variable
+//
+// 2. Same directory of the runtime
+//
+// 3. binaries-dir value from config file
+//
+// 4. Default location
+func hookBinaryPath(cfg *config.Config) (string, error) {
+	// Search in PATH
+	binPath, err := execLookPath("habana-container-hook")
+	if err == nil { // IF NO ERROR
+		return binPath, nil
+	}
+
+	// Search in the binary habana-container-runtime's dir
+	currentExec, err := osExecutable()
+	if err == nil { // IF NO ERROR
+		currentDir := filepath.Dir(currentExec)
+		binPath = path.Join(currentDir, "habana-container-hook")
+		if _, err := osStat(binPath); err == nil { // IF NO ERROR
+			return binPath, nil
+		}
+	}
+
+	// Search in the dir provided by binaries-dir
+	binPath = path.Join(cfg.BinariesDir, "habana-container-hook")
+	if _, err := osStat(binPath); err == nil { // IF NO ERROR
+		return binPath, nil
+	}
+
+	binPath = hookDefaultFilePath
+	_, err = osStat(binPath)
+	if err == nil { // IF NO ERROR
+		return binPath, nil
+	}
+	return "", fmt.Errorf("habana-container-hook was not found on the system")
+}

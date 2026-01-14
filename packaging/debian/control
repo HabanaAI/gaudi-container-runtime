@@ -1,0 +1,12 @@
+Source: habana-container-runtime
+Section: misc
+Priority: optional
+Maintainer: Tal Cohen <tacohen@habana.ai>
+Version: VERSION_PLACEHOLDER
+Homepage: https://github.com/HabanaAI/habana-container-runtime
+Build-Depends: debhelper (>= 9)
+
+Package: habanalabs-container-runtime
+Architecture: amd64
+Description: HABANA container runtime
+ Provides a modified version of runc allowing users to run Intel® Gaudi® enabled containers.
