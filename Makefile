@@ -1,12 +1,15 @@
 # Copyright (c) 2017-2021, Habana Labs. All rights reserved.
-TAG := $(shell git describe --abbrev=0 --tags --always | tr '[:upper:]' '[:lower:]')
+TAG ?= $(shell git describe --abbrev=0 --tags --always | tr '[:upper:]' '[:lower:]')
 HASH := $(shell git rev-parse HEAD)
 DATE := $(shell date +%Y-%m-%d.%H:%M:%S)
+UPDATE_TYPE ?= "patch"
 
 DOCKER ?= docker
 MKDIR  ?= mkdir
 DIST_DIR ?= $(CURDIR)/dist
 LOCAL_REGISTRY ?= ""
+DOCKER_SOCK ?= /var/run/docker.sock
+DOCKER_HOST ?= unix:///var/run/docker.sock
 
 RUNTIME_BINARY := habana-container-runtime
 HOOK_BINARY := habana-container-hook
@@ -19,8 +22,8 @@ LIB_NAME := habanalabs-container-runtime
 LIB_VERSION ?= 1.16.0
 PKG_REV ?= 1
 
-GOLANG_VERSION := 1.25.5
-GO_RELEASER_VERSION := 2.13.2
+GOLANG_VERSION := 1.25.8
+GO_RELEASER_VERSION := v2.13.3
 
 # # Go CI related commands
 build/bin: build-binary
@@ -59,58 +62,57 @@ check-format:
 lint:
 	@golangci-lint run ./...
 
-tidy:
-	@go mod tidy
-
 # Build the binaries in all available architectures.
 build:
-	docker run --rm \
+	$(DOCKER) run --rm \
 		-v $$PWD:/go/src/github.com/HabanaAI/habana-container-runtime \
 		-w /go/src/github.com/HabanaAI/habana-container-runtime \
 		-e GITHUB_TOKEN \
 		-e DOCKER_USERNAME \
 		-e DOCKER_PASSWORD \
 		-e DOCKER_REGISTRY \
-		artifactory-kfs.habana-labs.com/docker-mirror/goreleaser/goreleaser:v$(GO_RELEASER_VERSION) build --snapshot --clean
+		artifactory-kfs.habana-labs.com/docker-mirror/goreleaser/goreleaser:$(GO_RELEASER_VERSION) build --snapshot --clean
 	$(MAKE) update-dist-permissions
 
 # Build binaries, create archives and OS packages and uploads all artifacts to github repo
 release:
-	docker run --rm \
+	$(DOCKER) run --rm \
 		-v $$PWD:/go/src/github.com/HabanaAI/habana-container-runtime \
-		-v /var/run/docker.sock:/var/run/docker.sock \
+		-v $(DOCKER_SOCK):/var/run/docker.sock \
 		-w /go/src/github.com/HabanaAI/habana-container-runtime \
+		-e DOCKER_HOST=$(DOCKER_HOST) \
 		-e GITHUB_TOKEN \
 		-e DOCKER_USERNAME \
 		-e DOCKER_PASSWORD \
 		-e DOCKER_REGISTRY \
-		artifactory-kfs.habana-labs.com/docker-mirror/goreleaser/goreleaser:v$(GO_RELEASER_VERSION) release --clean --snapshot
+		artifactory-kfs.habana-labs.com/docker-mirror/goreleaser/goreleaser:$(GO_RELEASER_VERSION) release --clean --snapshot
 	$(MAKE) update-dist-permissions
-	$(MAKE) update-docker-tag
+	$(DOCKER) tag habana-container-runtime:$(TAG) $(IMAGE_TAG)
+	@$(DOCKER) rmi habana-container-runtime:$(TAG)
 
 cd-release:
-	docker run --rm \
+	$(DOCKER) run --rm \
 		-v $$PWD:/go/src/github.com/HabanaAI/habana-container-runtime \
-		-v /var/run/docker.sock:/var/run/docker.sock \
+		-v $(DOCKER_SOCK):/var/run/docker.sock \
 		-w /go/src/github.com/HabanaAI/habana-container-runtime \
 		-v $$(dirname $$PWD)/.repo:/go/src/github.com/HabanaAI/.repo \
 		-v $${HOME}/.gitconfig:/root/.gitconfig \
+		-e DOCKER_HOST=$(DOCKER_HOST) \
 		-e GITHUB_TOKEN \
 		-e DOCKER_USERNAME \
 		-e DOCKER_PASSWORD \
 		-e DOCKER_REGISTRY \
 		-e NFPM_PASSPHRASE \
-		artifactory-kfs.habana-labs.com/docker-mirror/goreleaser/goreleaser:v$(GO_RELEASER_VERSION) release --clean --snapshot --config .goreleaser-cd.yaml
-	$(MAKE) update-dist-permissions
-	$(MAKE) update-docker-tag
+		artifactory-kfs.habana-labs.com/docker-mirror/goreleaser/goreleaser:$(GO_RELEASER_VERSION) release --clean --snapshot --config .goreleaser-cd.yaml; \
+	$(MAKE) update-dist-permissions; \
+	$(MAKE) update-docker-tag;
 
 update-dist-permissions:
 	@sudo chown -R $$(id -u):$$(id -g) dist/ || :
 
 update-docker-tag:
-	@SEMVER=$$(echo $(TAG) | sed 's/-.*$$//'); \
-	docker tag habana-container-runtime:$(TAG) $(IMAGE_TAG)
-	@docker rmi habana-container-runtime:$(TAG)
+	$(DOCKER) tag habana-container-runtime:$(TAG) $(IMAGE_TAG); \
+	$(DOCKER) rmi habana-container-runtime:$(TAG)
 
 #######################################
 
@@ -175,7 +177,18 @@ docker-build-%:
 # upgrade
 .PHONY: update
 update: ## Update Go dependencies.
-	go get -u ./...
+	@if [ "$(UPDATE_TYPE)" = "patch" ]; then \
+		GO_MINOR=$$(awk '/^go / {split($$2, v, "."); print v[1] "." v[2]; exit}' go.mod) && \
+		go get go@$$GO_MINOR && \
+		go get toolchain@go$$GO_MINOR; \
+	else \
+		go get go@latest && \
+		go get toolchain@latest; \
+	fi
+	go get -u ./... && \
+	GO_VERSION=$$(awk '/^go / {print $$2; exit}' go.mod) && \
+		sed -i "s/FROM golang:.* AS golang/FROM golang:$$GO_VERSION AS golang/g" packaging/Dockerfile && \
+		sed -i "s/^GOLANG_VERSION := .*/GOLANG_VERSION := $$GO_VERSION/g" Makefile
 
 .PHONY: tidy
 tidy: ## Run go mod tidy.
@@ -190,5 +203,6 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 ## Upgrade dependencies and run quality checks.
+## Remember to 'export GOTOOLCHAIN=auto' before running this target to use the latest Go toolchain.
 .PHONY: upgrade
 upgrade: update tidy fmt vet

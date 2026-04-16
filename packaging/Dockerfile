@@ -1,4 +1,23 @@
-FROM golang:1.25.3 AS checks
+FROM golang:1.25.8 AS golang
+FROM busybox:1.37.0 AS busybox
+
+FROM golang AS workspace
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+ARG NO_PROXY=""
+ENV http_proxy=${HTTP_PROXY}
+ENV https_proxy=${HTTPS_PROXY}
+ENV no_proxy=${NO_PROXY}
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV NO_PROXY=${NO_PROXY}
+ARG REMOTE_USER=user-name-goes-here
+ARG REMOTE_UID=1000
+ARG REMOTE_GID=$REMOTE_UID
+RUN getent group ${REMOTE_GID} > /dev/null 2>&1 || groupadd --gid ${REMOTE_GID} ${REMOTE_USER}
+RUN useradd --uid $REMOTE_UID --gid $REMOTE_GID -m $REMOTE_USER
+
+FROM golang AS checks
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -25,7 +44,7 @@ RUN ./checksec --file=/usr/bin/habana-container-runtime --output=csv | grep -q "
 RUN ./checksec --file=/usr/bin/habana-container-toolkit --output=csv | grep -q "$CHECKSEC_REF"
 
 
-FROM busybox:1.37.0
+FROM busybox AS production
 COPY --from=checks /usr/bin/habana-container-runtime /usr/bin/habana-container-runtime
 COPY --from=checks /usr/bin/habana-container-hook /usr/bin/habana-container-hook
 COPY --from=checks /usr/bin/habana-container-cli /usr/bin/habana-container-cli

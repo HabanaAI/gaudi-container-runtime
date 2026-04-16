@@ -24,8 +24,10 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // hlsNumInterfaceByType hold the known number of network ports (internal+external)
@@ -69,7 +71,54 @@ func Generate(devicesIDs []string, containerRootFS string) error {
 		}
 	}
 
+	if err := symlinkCheck(netFilePath); err != nil {
+		return err
+	}
+
 	return collect(netFilePath, devicesIDs)
+}
+
+func symlinkCheck(filePath string) error {
+	// First, ensure no parent directory in the path is a symlink.
+	cleanPath := filepath.Clean(filePath)
+	dir := filepath.Dir(cleanPath)
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached filesystem root or cannot walk further.
+			break
+		}
+
+		fi, err := os.Lstat(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Parent doesn't exist yet; nothing to check at this level.
+				dir = parent
+				continue
+			}
+			return err
+		}
+
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("path component %s is a symlink, which is not allowed", dir)
+		}
+
+		dir = parent
+	}
+
+	// Now check the file itself (if it exists) without following symlinks.
+	fi, err := os.Lstat(filePath)
+	if os.IsNotExist(err) {
+		// Non-existent file is allowed; it will be created later.
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("the file %s is a symlink, which is not allowed", filePath)
+	}
+	return nil
 }
 
 // collect gathers MAC address info about the requested accelerators IDs.
@@ -86,8 +135,11 @@ func collect(netFilePath string, devicesIDs []string) error {
 		// is to insert logic to parse the expected internal and external ports from
 		// a mask, and create the config accordinly. Only than the file info will be correct,
 		// otherwise we better error out when ext ports are disabled. related issue: SW-190964.
-		f, err := os.Create(netFilePath)
+		f, err := os.OpenFile(netFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
 		if err != nil {
+			if errors.Is(err, syscall.ELOOP) {
+				return fmt.Errorf("path %s is a symlink, which is not allowed", netFilePath)
+			}
 			return err
 		}
 		defer f.Close()
@@ -136,8 +188,15 @@ func GaudinetFile(logger *slog.Logger, containerRootFS, source string) error {
 	}
 	defer srcFile.Close()
 
-	dst, err := os.OpenFile(path.Clean(destFile), os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+	if err := symlinkCheck(destFile); err != nil {
+		return err
+	}
+
+	dst, err := os.OpenFile(path.Clean(destFile), os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
 	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return fmt.Errorf("destination %s is a symlink, which is not allowed", destFile)
+		}
 		return err
 	}
 	defer dst.Close()

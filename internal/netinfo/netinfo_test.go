@@ -314,6 +314,87 @@ func TestGaudinetFile(t *testing.T) {
 	t.Run("ignore file does not exist", gaudinetIgnoreNonExistentFile)
 }
 
+func TestSymlinkCheck(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "gnet-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subdir, err := os.MkdirTemp(tmpDir, "subdir-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(tmpDir)
+	})
+
+	// Create a regular file
+	regFile := path.Join(subdir, "regular-file")
+	err = os.WriteFile(regFile, []byte("regular file content"), 0644)
+	if err != nil {
+		t.Fatalf("failed writing temp regular file: %v", err)
+	}
+
+	// Create a symlink to the regular file
+	symlink := path.Join(subdir, "symlink-file")
+	err = os.Symlink(regFile, symlink)
+	if err != nil {
+		t.Fatalf("failed creating symlink: %v", err)
+	}
+
+	// Create a dangling symlink (pointing to a non-existent target)
+	danglingSymlink := path.Join(subdir, "dangling-symlink")
+	err = os.Symlink(path.Join(subdir, "non-existent-target"), danglingSymlink)
+	if err != nil {
+		t.Fatalf("failed creating dangling symlink: %v", err)
+	}
+
+	symlinkDir := path.Join(tmpDir, "symlink-dir")
+	err = os.Symlink(subdir, symlinkDir)
+	if err != nil {
+		t.Fatalf("failed creating symlink: %v", err)
+	}
+	symlinkDirFile := path.Join(symlinkDir, "regular-file")
+
+	tests := []struct {
+		name      string
+		filePath  string
+		expectErr bool
+	}{
+		{
+			name:      "regular file should pass",
+			filePath:  regFile,
+			expectErr: false,
+		},
+		{
+			name:      "symlink should return an error",
+			filePath:  symlink,
+			expectErr: true,
+		},
+		{
+			name:      "dangling symlink should return an error",
+			filePath:  danglingSymlink,
+			expectErr: true,
+		},
+		{
+			name:      "symlink to directory should return an error",
+			filePath:  symlinkDirFile,
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := symlinkCheck(tt.filePath)
+			if tt.expectErr && err == nil {
+				t.Fatal("expected an error, got none")
+			}
+			if !tt.expectErr && err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
+	}
+}
+
 func gaudinetCopyFile(t *testing.T) {
 	h := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{})
 	logger := slog.New(h)

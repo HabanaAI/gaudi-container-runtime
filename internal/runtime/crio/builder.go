@@ -43,8 +43,17 @@ func WithLogger(logger *logrus.Logger) Option {
 	}
 }
 
-func FromConfigPath(path string) Option {
+// FromConfigPath loads the CRI-O configuration from the specified file path.
+// If create is true and the file does not exist, it will be created.
+func FromConfigPath(path string, create bool) Option {
 	return func(c *CRIOConfig) error {
+		if create {
+			err := utils.CreateFileIfNotExists(path)
+			if err != nil {
+				return fmt.Errorf("failed to create configuration file: %v", err)
+			}
+		}
+
 		tomlConfig, err := utils.NewToml(utils.TomlFromConfigPath[map[string]interface{}](path))
 		if err != nil {
 			return fmt.Errorf("failed to load configuration from path: %v", err)

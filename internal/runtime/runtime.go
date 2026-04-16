@@ -32,7 +32,7 @@ func NewRuntimeBuilder(runtimeType string, logger *logrus.Logger, configFilePath
 	case "crio":
 		builder, err = crio.New(
 			crio.WithLogger(logger),
-			crio.FromConfigPath(configFilePath),
+			crio.FromConfigPath(configFilePath, true),
 		)
 	case "docker":
 		builder, err = docker.New(

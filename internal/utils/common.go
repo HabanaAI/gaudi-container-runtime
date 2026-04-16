@@ -50,3 +50,14 @@ func GetProcessPid(processName string) (string, error) {
 
 	return pid, nil
 }
+
+func CreateFileIfNotExists(filePath string) error {
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		file, err := os.Create(filePath)
+		if err != nil {
+			return fmt.Errorf("unable to create file %s: %v", filePath, err)
+		}
+		defer file.Close()
+	}
+	return nil
+}
