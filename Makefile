@@ -22,7 +22,7 @@ LIB_NAME := habanalabs-container-runtime
 LIB_VERSION ?= 1.16.0
 PKG_REV ?= 1
 
-GOLANG_VERSION := 1.25.8
+GOLANG_VERSION := 1.26.4
 GO_RELEASER_VERSION := v2.13.3
 
 # # Go CI related commands

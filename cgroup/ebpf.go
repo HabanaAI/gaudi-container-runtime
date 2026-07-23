@@ -159,7 +159,7 @@ func (p *program) appendDevice(dev specs.LinuxDeviceCgroup, labelPrefix string) 
 	}
 	p.insts = append(p.insts, p.acceptBlock(dev.Allow)...)
 	// set blockSym to the first instruction we added in this iteration
-	p.insts[prevBlockLastIdx+1] = p.insts[prevBlockLastIdx+1].Sym(blockSym)
+	p.insts[prevBlockLastIdx+1] = p.insts[prevBlockLastIdx+1].WithSymbol(blockSym)
 	p.blockID++
 	return nil
 }
@@ -181,7 +181,7 @@ func (p *program) finalize(origInsts asm.Instructions, labelPrefix string) (asm.
 	// set blockSym to the first instruction of origInsts so we are able to jump to it properly
 	blockSym := fmt.Sprintf("%s-block-%d", labelPrefix, p.blockID)
 	p.insts = append(p.insts, origInsts...)
-	p.insts[lenInsts] = p.insts[lenInsts].Sym(blockSym)
+	p.insts[lenInsts] = p.insts[lenInsts].WithSymbol(blockSym)
 	p.blockID = -1
 	return p.insts, nil
 }

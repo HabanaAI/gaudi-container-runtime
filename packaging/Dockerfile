@@ -1,4 +1,4 @@
-FROM golang:1.25.8 AS golang
+FROM golang:1.26.4 AS golang
 FROM busybox:1.37.0 AS busybox
 
 FROM golang AS workspace
