@@ -1,5 +1,7 @@
-FROM golang:1.26.4 AS golang
+FROM golang:1.26.7 AS golang
 FROM busybox:1.37.0 AS busybox
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest as ubi9-base
+
 
 FROM golang AS workspace
 ARG HTTP_PROXY=""
@@ -16,6 +18,7 @@ ARG REMOTE_UID=1000
 ARG REMOTE_GID=$REMOTE_UID
 RUN getent group ${REMOTE_GID} > /dev/null 2>&1 || groupadd --gid ${REMOTE_GID} ${REMOTE_USER}
 RUN useradd --uid $REMOTE_UID --gid $REMOTE_GID -m $REMOTE_USER
+
 
 FROM golang AS checks
 ARG HTTP_PROXY
@@ -44,18 +47,30 @@ RUN ./checksec --file=/usr/bin/habana-container-runtime --output=csv | grep -q "
 RUN ./checksec --file=/usr/bin/habana-container-toolkit --output=csv | grep -q "$CHECKSEC_REF"
 
 
+FROM ubi9-base as ubi9
+RUN microdnf install -y coreutils-single && microdnf clean all
+COPY --from=checks /usr/bin/habana-container-runtime /usr/bin/habana-container-runtime
+COPY --from=checks /usr/bin/habana-container-hook /usr/bin/habana-container-hook
+COPY --from=checks /usr/bin/habana-container-cli /usr/bin/habana-container-cli
+COPY --from=checks /usr/bin/habana-container-toolkit /usr/bin/habana-container-toolkit
+COPY --from=checks /etc/habana-container-runtime/config.toml /etc/habana-container-runtime/config.toml
+COPY --from=checks /usr/libexec/oci/hooks.d/oci-habana-hook /usr/libexec/oci/hooks.d/oci-habana-hook
+COPY --from=checks /usr/share/containers/oci/hooks.d/oci-habana-hook.json /usr/share/containers/oci/hooks.d/oci-habana-hook.json
+COPY --from=checks /usr/share/doc/habana-container-runtime/copyright /usr/share/doc/habana-container-runtime/copyright
+COPY licenses/ /licenses
+COPY LICENSE /licenses/intel-gaudi-container-runtime/LICENSE
+USER 65532:65532
+
+
 FROM busybox AS production
 COPY --from=checks /usr/bin/habana-container-runtime /usr/bin/habana-container-runtime
 COPY --from=checks /usr/bin/habana-container-hook /usr/bin/habana-container-hook
 COPY --from=checks /usr/bin/habana-container-cli /usr/bin/habana-container-cli
 COPY --from=checks /usr/bin/habana-container-toolkit /usr/bin/habana-container-toolkit
-
 COPY --from=checks /etc/habana-container-runtime/config.toml /etc/habana-container-runtime/config.toml
 COPY --from=checks /usr/libexec/oci/hooks.d/oci-habana-hook /usr/libexec/oci/hooks.d/oci-habana-hook
 COPY --from=checks /usr/share/containers/oci/hooks.d/oci-habana-hook.json /usr/share/containers/oci/hooks.d/oci-habana-hook.json
 COPY --from=checks /usr/share/doc/habana-container-runtime/copyright /usr/share/doc/habana-container-runtime/copyright
-
 COPY licenses/ /licenses
 COPY LICENSE /licenses/intel-gaudi-container-runtime/LICENSE
-
 USER 65532:65532

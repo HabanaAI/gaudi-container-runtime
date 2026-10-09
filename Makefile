@@ -16,13 +16,13 @@ HOOK_BINARY := habana-container-hook
 CLI_BINARY := habana-container-cli
 TOOLKIT_BINARY := habana-container-toolkit
 
-IMAGE_TAG := artifactory-kfs.habana-labs.com/artifactory/docker-local/$(subst -$(word 2,$(subst -, ,$(TAG))),,$(TAG))/habanalabs/habana-container-runtime:$(TAG)
+IMAGE_TAG := artifactory-kfs.iil.labsad.intel.com/artifactory/docker-local/$(subst -$(word 2,$(subst -, ,$(TAG))),,$(TAG))/habanalabs/habana-container-runtime:$(TAG)
 
 LIB_NAME := habanalabs-container-runtime
 LIB_VERSION ?= 1.16.0
 PKG_REV ?= 1
 
-GOLANG_VERSION := 1.26.4
+GOLANG_VERSION := 1.26.7
 GO_RELEASER_VERSION := v2.13.3
 
 # # Go CI related commands
@@ -71,7 +71,7 @@ build:
 		-e DOCKER_USERNAME \
 		-e DOCKER_PASSWORD \
 		-e DOCKER_REGISTRY \
-		artifactory-kfs.habana-labs.com/docker-mirror/goreleaser/goreleaser:$(GO_RELEASER_VERSION) build --snapshot --clean
+		artifactory-kfs.iil.labsad.intel.com/docker-mirror/goreleaser/goreleaser:$(GO_RELEASER_VERSION) build --snapshot --clean
 	$(MAKE) update-dist-permissions
 
 # Build binaries, create archives and OS packages and uploads all artifacts to github repo
@@ -85,7 +85,7 @@ release:
 		-e DOCKER_USERNAME \
 		-e DOCKER_PASSWORD \
 		-e DOCKER_REGISTRY \
-		artifactory-kfs.habana-labs.com/docker-mirror/goreleaser/goreleaser:$(GO_RELEASER_VERSION) release --clean --snapshot
+		artifactory-kfs.iil.labsad.intel.com/docker-mirror/goreleaser/goreleaser:$(GO_RELEASER_VERSION) release --clean --snapshot
 	$(MAKE) update-dist-permissions
 	$(DOCKER) tag habana-container-runtime:$(TAG) $(IMAGE_TAG)
 	@$(DOCKER) rmi habana-container-runtime:$(TAG)
@@ -103,7 +103,7 @@ cd-release:
 		-e DOCKER_PASSWORD \
 		-e DOCKER_REGISTRY \
 		-e NFPM_PASSPHRASE \
-		artifactory-kfs.habana-labs.com/docker-mirror/goreleaser/goreleaser:$(GO_RELEASER_VERSION) release --clean --snapshot --config .goreleaser-cd.yaml; \
+		artifactory-kfs.iil.labsad.intel.com/docker-mirror/goreleaser/goreleaser:$(GO_RELEASER_VERSION) release --clean --snapshot --config .goreleaser-cd.yaml; \
 	$(MAKE) update-dist-permissions; \
 	$(MAKE) update-docker-tag;
 
@@ -112,7 +112,9 @@ update-dist-permissions:
 
 update-docker-tag:
 	$(DOCKER) tag habana-container-runtime:$(TAG) $(IMAGE_TAG); \
-	$(DOCKER) rmi habana-container-runtime:$(TAG)
+	$(DOCKER) rmi habana-container-runtime:$(TAG); \
+	$(DOCKER) tag habana-container-runtime:$(TAG)ubi9 $(IMAGE_TAG)ubi9; \
+	$(DOCKER) rmi habana-container-runtime:$(TAG)ubi9
 
 #######################################
 
