@@ -43,6 +43,7 @@ var configDir = "/etc/"
 
 type Config struct {
 	AcceptEnvvarUnprivileged bool          `toml:"accept-habana-visible-devices-envvar-when-unprivileged"`
+	AllowEnvDeviceRequests   bool          `toml:"allow-env-device-requests"`
 	BinariesDir              string        `toml:"binaries-dir"`
 	CLI                      CLIConfig     `toml:"habana-container-cli"`
 	MountAccelerators        bool          `toml:"mount_accelerators"`
@@ -96,6 +97,7 @@ func Load() (*Config, error) {
 func DefaultConfig() Config {
 	return Config{
 		AcceptEnvvarUnprivileged: true,
+		AllowEnvDeviceRequests:   false,
 		MountAccelerators:        true,
 		MountUverbs:              true,
 		BinariesDir:              "/usr/local/bin",

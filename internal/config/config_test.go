@@ -19,7 +19,28 @@ import (
 	"log/slog"
 	"reflect"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 )
+
+func TestEnvironmentDeviceRequestsRequireOptIn(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.AllowEnvDeviceRequests {
+		t.Fatal("environment-only device requests must be disabled by default")
+	}
+	if err := toml.Unmarshal([]byte("accept-habana-visible-devices-envvar-when-unprivileged = true\n"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AllowEnvDeviceRequests {
+		t.Fatal("legacy unprivileged setting enabled environment-only allocation")
+	}
+	if err := toml.Unmarshal([]byte("allow-env-device-requests = true\n"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AllowEnvDeviceRequests {
+		t.Fatal("explicit standalone compatibility setting was ignored")
+	}
+}
 
 func TestGetConfig(t *testing.T) {
 	want := &Config{

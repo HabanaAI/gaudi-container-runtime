@@ -22,7 +22,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 
@@ -31,11 +30,8 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
-var accelModuleId = discover.AcceleratorModuleID
-var accelPciId = discover.AcceleratorPciID
-
 func loadSpecs(bundleConfigFile string) (*specs.Spec, error) {
-	jsonFile, err := os.OpenFile(filepath.Clean(bundleConfigFile), os.O_RDWR, 0644)
+	jsonFile, err := os.Open(filepath.Clean(bundleConfigFile))
 	if err != nil {
 		return nil, fmt.Errorf("opening OCI spec file: %w", err)
 	}
@@ -51,25 +47,36 @@ func loadSpecs(bundleConfigFile string) (*specs.Spec, error) {
 }
 
 func saveSpecs(bundleConfigFile string, spec *specs.Spec) error {
-	jsonFile, err := os.OpenFile(filepath.Clean(bundleConfigFile), os.O_RDWR, 0644)
-	if err != nil {
-		return fmt.Errorf("opening OCI spec file: %w", err)
-	}
-	defer jsonFile.Close()
-
 	jsonOutput, err := json.Marshal(spec)
 	if err != nil {
 		return fmt.Errorf("marshaling OCI spec: %w", err)
 	}
-
-	_, err = jsonFile.WriteAt(jsonOutput, 0)
+	info, err := os.Stat(bundleConfigFile)
 	if err != nil {
-		return fmt.Errorf("writing to OCI spec file: %w", err)
+		return fmt.Errorf("stat OCI spec file: %w", err)
+	}
+	jsonFile, err := os.CreateTemp(filepath.Dir(bundleConfigFile), ".habana-config-*")
+	if err != nil {
+		return fmt.Errorf("creating OCI spec file: %w", err)
+	}
+	defer os.Remove(jsonFile.Name())
+	defer jsonFile.Close()
+	if err := jsonFile.Chmod(info.Mode().Perm()); err != nil {
+		return err
+	}
+	if _, err := jsonFile.Write(jsonOutput); err != nil {
+		return fmt.Errorf("writing OCI spec file: %w", err)
+	}
+	if err := jsonFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(jsonFile.Name(), bundleConfigFile); err != nil {
+		return fmt.Errorf("replacing OCI spec file: %w", err)
 	}
 	return nil
 }
 
-func addPrestartHook(logger *slog.Logger, spec *specs.Spec, cfg *config.Config) error {
+func addPrestartHook(logger *slog.Logger, spec *specs.Spec, cfg *config.Config, requestedDevs []string) error {
 	// path, err := execLookPath("habana-container-runtime-hook")
 	path, err := hookBinaryPath(cfg)
 	if err != nil {
@@ -85,25 +92,30 @@ func addPrestartHook(logger *slog.Logger, spec *specs.Spec, cfg *config.Config) 
 	if spec.Hooks == nil {
 		spec.Hooks = &specs.Hooks{}
 	} else if len(spec.Hooks.Prestart) != 0 {
-		for _, hook := range spec.Hooks.Prestart {
+		found := false
+		for index, hook := range spec.Hooks.Prestart {
 			if !strings.Contains(hook.Path, "habana-container-hook") {
 				continue
 			}
-			logger.Info("Existing habana prestart hook in OCI spec file")
+			spec.Hooks.Prestart[index].Path = path
+			spec.Hooks.Prestart[index].Args = append(args, "--devices="+strings.Join(requestedDevs, ","), "prestart")
+			found = true
+		}
+		if found {
 			return nil
 		}
 	}
 
 	spec.Hooks.Prestart = append(spec.Hooks.Prestart, specs.Hook{
 		Path: path,
-		Args: append(args, "prestart"),
+		Args: append(args, "--devices="+strings.Join(requestedDevs, ","), "prestart"),
 	})
 
 	logger.Info("Prestart hook added, executing runc")
 	return nil
 }
 
-func addCreateRuntimeHook(logger *slog.Logger, spec *specs.Spec, cfg *config.Config) error {
+func addCreateRuntimeHook(logger *slog.Logger, spec *specs.Spec, cfg *config.Config, requestedDevs []string) error {
 	path, err := hookBinaryPath(cfg)
 	if err != nil {
 		path = hookDefaultFilePath
@@ -118,18 +130,23 @@ func addCreateRuntimeHook(logger *slog.Logger, spec *specs.Spec, cfg *config.Con
 	if spec.Hooks == nil {
 		spec.Hooks = &specs.Hooks{}
 	} else if len(spec.Hooks.CreateRuntime) != 0 {
-		for _, hook := range spec.Hooks.CreateRuntime {
+		found := false
+		for index, hook := range spec.Hooks.CreateRuntime {
 			if !strings.Contains(hook.Path, "habana-container-hook") {
 				continue
 			}
-			logger.Info("Existing habana createRuntime hook in OCI spec file")
+			spec.Hooks.CreateRuntime[index].Path = path
+			spec.Hooks.CreateRuntime[index].Args = append(args, "--devices="+strings.Join(requestedDevs, ","), "createRuntime")
+			found = true
+		}
+		if found {
 			return nil
 		}
 	}
 
 	spec.Hooks.CreateRuntime = append(spec.Hooks.CreateRuntime, specs.Hook{
 		Path: path,
-		Args: append(args, "createRuntime"),
+		Args: append(args, "--devices="+strings.Join(requestedDevs, ","), "createRuntime"),
 	})
 
 	logger.Info("createRuntime hook added, executing runc")
@@ -143,7 +160,8 @@ func addAcceleratorDevices(logger *slog.Logger, spec *specs.Spec, requestedDevs 
 	var devs []*discover.DevInfo
 	for _, reqDev := range requestedDevs {
 		for _, d := range discover.AcceleratorDevices() {
-			if d[len(d)-1:] != reqDev {
+			id, valid := discover.AcceleratorID(d)
+			if !valid || id != reqDev {
 				continue
 			}
 			logger.Info("Adding accelerator device", "path", d)
@@ -180,27 +198,15 @@ func addAcceleratorModuleIDs(logger *slog.Logger, spec *specs.Spec, requestedDev
 	return nil
 }
 
-func addUverbsDevices(logger *slog.Logger, spec *specs.Spec) error {
+func addUverbsDevices(logger *slog.Logger, spec *specs.Spec, requestedDevs []string) error {
 	logger.Debug("Discovering uverbs")
 
 	var devs []*discover.DevInfo
-	hlibDevices := filterDevicesByENV(spec, discover.InfinibandDevices())
-	for _, hlib := range hlibDevices {
-		logger.Debug("Getting uverbs device for hlib", "hlib", hlib)
-
-		// Extract uverb from hlib device
-		uverbs, err := osReadDir(fmt.Sprintf("%s/device/infiniband_verbs", hlib))
-		if err != nil {
-			logger.Error(fmt.Sprintf("Reading hlib directory: %v", err))
-			continue
-		}
-		if len(uverbs) == 0 {
-			logger.Debug("No uverbs devices found for devices", "device", hlib)
-			continue
-		}
-		uverbDev := fmt.Sprintf("/dev/infiniband/%s", uverbs[0].Name())
-
-		// Prepare devices in OCI format
+	uverbs, err := discover.UverbsForAccelerators(requestedDevs)
+	if err != nil {
+		return err
+	}
+	for _, uverbDev := range uverbs {
 		logger.Info("Adding uverb device", "path", uverbDev)
 		i, err := discover.DeviceInfo(uverbDev)
 		if err != nil {
@@ -214,81 +220,6 @@ func addUverbsDevices(logger *slog.Logger, spec *specs.Spec) error {
 	addAllowList(logger, spec, devs)
 
 	return nil
-}
-
-func getRequestedDevicesFromEnv(envArgName string, env []string) []string {
-	// Get requested devices from environment variable
-	var requestedDevs []string
-	for _, ev := range env {
-		if strings.HasPrefix(ev, envArgName) {
-			_, values, found := strings.Cut(ev, "=")
-			if found {
-				if values == "all" {
-					return []string{}
-				} else {
-					requestedDevs = strings.Split(values, ",")
-				}
-			}
-			break
-		}
-	}
-
-	return requestedDevs
-}
-
-func filterDevicesByENV(spec *specs.Spec, devices []string) []string {
-	// Handle case when user provided environment variable HABANA_VISIBLE_DEVICES
-	requestedDevs := getRequestedDevicesFromEnv(EnvHLVisibleDevices, spec.Process.Env)
-	useModuleID := false
-	usePciID := false
-
-	// If user provided HABANA_VISIBLE_MODULES, we need to use module IDs
-	if len(requestedDevs) == 0 {
-		requestedDevs = getRequestedDevicesFromEnv(EnvHLVisibleModules, spec.Process.Env)
-		if len(requestedDevs) > 0 {
-			useModuleID = true
-		}
-	}
-
-	// Case when user provided HABANA_VISIBLE_PCI_BUS_IDS
-	if len(requestedDevs) == 0 {
-		requestedDevs = getRequestedDevicesFromEnv(EnvHLVisiblePciBusIds, spec.Process.Env)
-		if len(requestedDevs) > 0 {
-			usePciID = true
-		}
-	}
-
-	// Case when alwaysMatch is true, and user didn't provide the environment variable
-	if len(requestedDevs) == 0 {
-		return devices
-	}
-
-	var filteredDevices []string
-	for _, dev := range devices {
-		devID := string(dev[len(dev)-1])
-
-		if useModuleID {
-			var err error
-			devID, err = accelModuleId(devID)
-			if err != nil {
-				panic(err)
-			}
-		}
-
-		if usePciID {
-			var err error
-			devID, err = accelPciId(devID)
-			if err != nil {
-				panic(err)
-			}
-		}
-
-		if slices.Contains(requestedDevs, devID) {
-			filteredDevices = append(filteredDevices, dev)
-		}
-	}
-
-	return filteredDevices
 }
 
 // addDevicesToSpec adds list of devices nodes to be created for container.
@@ -355,7 +286,14 @@ func addAllowList(logger *slog.Logger, spec *specs.Spec, devices []*discover.Dev
 }
 
 func addEnvVar(spec *specs.Spec, key string, value string) {
-	spec.Process.Env = append(spec.Process.Env, fmt.Sprintf("%s=%v", key, value))
+	env := spec.Process.Env[:0]
+	for _, entry := range spec.Process.Env {
+		name, _, _ := strings.Cut(entry, "=")
+		if name != key {
+			env = append(env, entry)
+		}
+	}
+	spec.Process.Env = append(env, fmt.Sprintf("%s=%v", key, value))
 }
 
 // hookBinaryPath looks for the binary in the following locations by order:

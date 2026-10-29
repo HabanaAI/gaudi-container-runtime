@@ -23,8 +23,12 @@ import (
 	"strings"
 
 	"github.com/HabanaAI/habana-container-runtime/internal/config"
+	"github.com/HabanaAI/habana-container-runtime/internal/discover"
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/mod/semver"
 )
+
+var resolveDevices = discover.ResolveDevices
 
 const (
 	envHBVisibleDevices = "HABANA_VISIBLE_DEVICES"
@@ -81,10 +85,11 @@ type Mount struct {
 // We use pointers to structs, similarly to the latest version of runtime-spec:
 // https://github.com/opencontainers/runtime-spec/blob/v1.0.0/specs-go/config.go#L5-L28
 type Spec struct {
-	Version *string  `json:"ociVersion"`
-	Process *Process `json:"process,omitempty"`
-	Root    *Root    `json:"root,omitempty"`
-	Mounts  []Mount  `json:"mounts,omitempty"`
+	Version *string      `json:"ociVersion"`
+	Process *Process     `json:"process,omitempty"`
+	Root    *Root        `json:"root,omitempty"`
+	Mounts  []Mount      `json:"mounts,omitempty"`
+	Linux   *specs.Linux `json:"linux,omitempty"`
 }
 
 // HookState holds state information about the hook
@@ -239,6 +244,20 @@ func getHabanaConfig(hookConfig *config.Config, env map[string]string, mounts []
 	}
 }
 
+func resolveHabanaConfig(hook config.Config, spec *specs.Spec, explicitDevices string) (*habanaConfig, error) {
+	if explicitDevices != "" {
+		spec = &specs.Spec{
+			Linux:   spec.Linux,
+			Process: &specs.Process{Env: []string{envHBVisibleDevices + "=" + explicitDevices}},
+		}
+	}
+	devices, err := resolveDevices(spec, hook.AllowEnvDeviceRequests, hook.Runtime.AlwaysMount)
+	if err != nil || len(devices) == 0 {
+		return nil, err
+	}
+	return &habanaConfig{Devices: strings.Join(devices, ",")}, nil
+}
+
 func getContainerConfig(hook config.Config) (config containerConfig) {
 	var h HookState
 	d := json.NewDecoder(os.Stdin)
@@ -255,10 +274,26 @@ func getContainerConfig(hook config.Config) (config containerConfig) {
 
 	env := getEnvMap(s.Process.Env)
 	privileged := isPrivileged(s)
+	var habana *habanaConfig
+	if hook.Runtime.Mode == ModeCDI {
+		habana = getHabanaConfig(&hook, env, s.Mounts, privileged)
+	} else {
+		if hook.AllowEnvDeviceRequests && !hook.AcceptEnvvarUnprivileged && !privileged {
+			log.Panicln("insufficient privileges for environment-based device requests")
+		}
+		var err error
+		habana, err = resolveHabanaConfig(hook, &specs.Spec{
+			Process: &specs.Process{Env: s.Process.Env},
+			Linux:   s.Linux,
+		}, *devicesflag)
+		if err != nil {
+			log.Panicln("authorizing Habana hook devices:", err)
+		}
+	}
 	return containerConfig{
 		Pid:    h.Pid,
 		Rootfs: s.Root.Path,
 		Env:    env,
-		Habana: getHabanaConfig(&hook, env, s.Mounts, privileged),
+		Habana: habana,
 	}
 }

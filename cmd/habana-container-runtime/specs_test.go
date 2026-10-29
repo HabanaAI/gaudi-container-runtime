@@ -17,244 +17,73 @@ package main
 
 import (
 	"errors"
-	"fmt"
+	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/HabanaAI/habana-container-runtime/internal/config"
-	"github.com/HabanaAI/habana-container-runtime/internal/discover"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
-func TestFilterDevicesByENV(t *testing.T) {
-	tests := []struct {
-		name        string
-		spec        specs.Spec
-		devices     []string
-		expDevices  []string
-		getModuleID func(string) (string, error)
-		getPciID    func(string) (string, error)
-	}{
-		{
-			name: "no env var return all devices",
-			spec: specs.Spec{
-				Process: &specs.Process{
-					Env: []string{},
-				},
-			},
-			devices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-			expDevices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-		},
-		{
-			name: "env var without values returns all devices",
-			spec: specs.Spec{
-				Process: &specs.Process{
-					Env: []string{
-						EnvHLVisibleDevices,
-					},
-				},
-			},
-			devices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-			expDevices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-		},
-		{
-			name: "env var with 'all' returns all devices",
-			spec: specs.Spec{
-				Process: &specs.Process{
-					Env: []string{
-						fmt.Sprintf("%s=all", EnvHLVisibleDevices),
-					},
-				},
-			},
-			devices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-			expDevices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-		},
-		{
-			name: "env var with single value returns only requested device",
-			spec: specs.Spec{
-				Process: &specs.Process{
-					Env: []string{
-						fmt.Sprintf("%s=0", EnvHLVisibleDevices),
-					},
-				},
-			},
-			devices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-			expDevices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-			},
-		},
-		{
-			name: "env var with multiple values returns only requested device",
-			spec: specs.Spec{
-				Process: &specs.Process{
-					Env: []string{
-						fmt.Sprintf("%s,=0,1,2", EnvHLVisibleDevices),
-					},
-				},
-			},
-			devices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/accel/accel2",
-				"/dev/accel/accel_controlD2",
-				"/dev/accel/accel3",
-				"/dev/accel/accel_controlD3",
-			},
-			expDevices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/accel/accel2",
-				"/dev/accel/accel_controlD2",
-			},
-		},
-		{
-			name: "env var with single value returns only requested device with correct module id",
-			spec: specs.Spec{
-				Process: &specs.Process{
-					Env: []string{
-						fmt.Sprintf("%s=0", EnvHLVisibleModules),
-					},
-				},
-			},
-			devices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-			expDevices: []string{
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-			getModuleID: func(acceleratorID string) (string, error) {
-				switch acceleratorID {
-				case "0":
-					return "1", nil
-				case "1":
-					return "0", nil
-				default:
-					return "", fmt.Errorf("unknown accelerator id %s", acceleratorID)
-				}
-			},
-		},
-		{
-			name: "env var with single value returns only requested device with correct pci id",
-			spec: specs.Spec{
-				Process: &specs.Process{
-					Env: []string{
-						fmt.Sprintf("%s=0000:5d:00.0", EnvHLVisiblePciBusIds),
-					},
-				},
-			},
-			devices: []string{
-				"/dev/accel/accel0",
-				"/dev/accel/accel_controlD0",
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-			expDevices: []string{
-				"/dev/accel/accel1",
-				"/dev/accel/accel_controlD1",
-				"/dev/infiniband/uverbs1",
-			},
-			getPciID: func(acceleratorID string) (string, error) {
-				switch acceleratorID {
-				case "0":
-					return "0000:09:00.0", nil
-				case "1":
-					return "0000:5d:00.0", nil
-				default:
-					return "", fmt.Errorf("unknown accelerator id %s", acceleratorID)
-				}
-			},
-		},
+func TestHookArguments(t *testing.T) {
+	original := execLookPath
+	t.Cleanup(func() { execLookPath = original })
+	execLookPath = func(string) (string, error) { return "/trusted/habana-container-hook", nil }
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := config.DefaultConfig()
+	spec := &specs.Spec{}
+	if err := addPrestartHook(logger, spec, &cfg, []string{"0", "10"}); err != nil {
+		t.Fatal(err)
 	}
+	if err := addCreateRuntimeHook(logger, spec, &cfg, []string{"10"}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(spec.Hooks.Prestart[0].Args, []string{"/trusted/habana-container-hook", "--devices=0,10", "prestart"}) {
+		t.Fatalf("prestart arguments = %v", spec.Hooks.Prestart[0].Args)
+	}
+	if !reflect.DeepEqual(spec.Hooks.CreateRuntime[0].Args, []string{"/trusted/habana-container-hook", "--devices=10", "createRuntime"}) {
+		t.Fatalf("createRuntime arguments = %v", spec.Hooks.CreateRuntime[0].Args)
+	}
+	if err := addPrestartHook(logger, spec, &cfg, []string{"10"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := addCreateRuntimeHook(logger, spec, &cfg, []string{"0"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.Hooks.Prestart) != 1 || spec.Hooks.Prestart[0].Args[1] != "--devices=10" ||
+		len(spec.Hooks.CreateRuntime) != 1 || spec.Hooks.CreateRuntime[0].Args[1] != "--devices=0" {
+		t.Fatal("existing hook kept stale device selection")
+	}
+}
 
-	defer func() {
-		accelModuleId = discover.AcceleratorModuleID
-		accelPciId = discover.AcceleratorPciID
-	}()
-
-	for _, tt := range tests {
-		if tt.getModuleID != nil {
-			accelModuleId = tt.getModuleID
-		} else {
-			accelModuleId = func(acceleratorID string) (string, error) {
-				return acceleratorID, nil
-			}
-		}
-
-		if tt.getPciID != nil {
-			accelPciId = tt.getPciID
-		} else {
-			accelPciId = func(acceleratorID string) (string, error) {
-				return acceleratorID, nil
-			}
-		}
-
-		t.Run(tt.name, func(t *testing.T) {
-			s := tt.spec
-			got := filterDevicesByENV(&s, tt.devices)
-			if len(got) != len(tt.expDevices) {
-				t.Errorf("got=%d devices, want %d devices", len(got), len(tt.expDevices))
-			}
-			if !reflect.DeepEqual(got, tt.expDevices) {
-				t.Errorf("got=%v, want %v", got, tt.expDevices)
-			}
-		})
+func TestSaveSpecs(t *testing.T) {
+	bundleFile := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(bundleFile, []byte(`{"ociVersion":"1.0.2","process":{"env":["LONG_VALUE=padding"]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec := &specs.Spec{Version: "1.0.2"}
+	if err := saveSpecs(bundleFile, spec); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadSpecs(bundleFile)
+	if err != nil || !reflect.DeepEqual(got, spec) {
+		t.Fatalf("saved spec = %v, %v", got, err)
+	}
+	info, err := os.Stat(bundleFile)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("spec permissions were not preserved: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(bundleFile))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("temporary spec files remain: %v, %v", entries, err)
+	}
+	if err := saveSpecs(filepath.Join(t.TempDir(), "missing.json"), spec); err == nil {
+		t.Fatal("missing spec file was accepted")
 	}
 }
 

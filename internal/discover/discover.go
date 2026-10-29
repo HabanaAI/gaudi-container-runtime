@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -138,11 +139,16 @@ func ExternalInterfaces(absHlibDevicePaths []string) ([]string, error) {
 func CharDevices(prefixes []string) ([]string, error) {
 	var devices []string
 	for _, prefix := range prefixes {
-		matches, err := filepath.Glob(fmt.Sprintf("/dev/%s[0-9]", prefix))
+		matches, err := filepath.Glob(fmt.Sprintf("/dev/%s[0-9]*", prefix))
 		if err != nil {
 			return nil, fmt.Errorf("discover accelerators: %w", err)
 		}
-		devices = append(devices, matches...)
+		for _, match := range matches {
+			id := strings.TrimPrefix(match, "/dev/"+prefix)
+			if _, err := strconv.ParseUint(id, 10, 32); err == nil {
+				devices = append(devices, match)
+			}
+		}
 	}
 	if len(devices) == 0 {
 		return nil, ErrNoDevices
@@ -156,7 +162,10 @@ func DevicesIDs(devices []string) []string {
 	m := make(map[string]bool)
 
 	for _, dev := range devices {
-		devID := string(dev[len(dev)-1])
+		devID, valid := AcceleratorID(dev)
+		if !valid {
+			continue
+		}
 		if !m[devID] {
 			m[devID] = true
 			unique = append(unique, devID)

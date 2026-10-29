@@ -1,4 +1,12 @@
 disable-require = false
+
+## Device selectors only configure accelerators already granted in the original
+## OCI device list and cgroup permissions. Keep this false on shared nodes.
+## Set true only for trusted standalone users who may grant themselves any host
+## Gaudi device through environment variables. This bypasses allocation checks.
+allow-env-device-requests = false
+
+## Legacy privilege option; this does not authorize device allocation.
 #accept-habana-visible-devices-envvar-when-unprivileged = true
 #accept-habana-visible-devices-as-volume-mounts = false
 
@@ -28,9 +36,9 @@ log_file = "/var/log/habana-container-hook.log"
 
 [habana-container-runtime]
 
-## Always try to expose devices on any container, no matter if requested the devices
-## This is not recommended as it exposes devices and required metadata into any container
-## This setting is left as backward compatability.
+## Configure all authorized accelerators when no device selector is present.
+## This never bypasses allocation checks unless allow-env-device-requests is true.
+## In that standalone compatibility mode, this exposes all host Gaudi devices.
 ##
 ## Default: false
 #visible_devices_all_as_default = true

@@ -1,7 +1,7 @@
 # Habana-Container-Runtime
 
-A modified version of [runc](https://github.com/opencontainers/runc) adding a custom [pre-start hook](https://github.com/HabanaAI/habana-container-hook) to all containers
-If environment variable `HABANA_VISIBLE_DEVICES` is set in the OCI spec, the hook will configure Habana device access for the container by leveraging `habana-container-cli` from project [libhabana-container](https://github.com/HabanaAI/libhabana-container).
+A wrapper for [runc](https://github.com/opencontainers/runc) that configures Habana devices and their network interfaces using `habana-container-hook` and `habana-container-cli`.
+By default, environment variables select only accelerators already authorized by the container engine's OCI device entries and cgroup permissions. Environment variables alone do not authorize device access.
 
 - [Habana-Container-Runtime](#habana-container-runtime)
   - [Installation](#installation)
@@ -160,27 +160,16 @@ Restart crio service: `systemctl restart crio.service`
 ## Usage example
 
 Currently habana-container-runtime has to be used with habana-container-hook and libhabana-container
-Bellow is the case when host machine has 8 Habana devices and mount `all` by HABANA_VISIBLE_DEVICES=all
+Authorize accelerator 0 through Docker's device options. `HABANA_VISIBLE_DEVICES=all`
+then selects only that authorized accelerator, not every accelerator on the host.
 
 ```bash
-docker run --rm --runtime=habana -e HABANA_VISIBLE_DEVICES=all ubuntu:22.04 /bin/bash -c "ls /dev/accel/*"
+docker run --rm --runtime=habana \
+  --device=/dev/accel/accel0 --device=/dev/accel/accel_controlD0 \
+  -e HABANA_VISIBLE_DEVICES=all ubuntu:22.04 /bin/bash -c "ls /dev/accel/*"
 
 /dev/accel/accel0
-/dev/accel/accel1
-/dev/accel/accel2
-/dev/accel/accel3
-/dev/accel/accel4
-/dev/accel/accel5
-/dev/accel/accel6
-/dev/accel/accel7
 /dev/accel/accel_controlD0
-/dev/accel/accel_controlD1
-/dev/accel/accel_controlD2
-/dev/accel/accel_controlD3
-/dev/accel/accel_controlD4
-/dev/accel/accel_controlD5
-/dev/accel/accel_controlD6
-/dev/accel/accel_controlD7
 ```
 
 
@@ -193,7 +182,13 @@ This variable controls which Habana devices will be made accessible inside the c
 
 #### Possible values
 * `0,1,2` …: a comma-separated list of index(es).
-* `all`: all Habana devices will be accessible, this is the default value in our container images.
+* `all`: select all already-authorized Habana accelerators. This is the default value in our container images.
+* Empty, `none`, or `void`: perform no additional Habana setup.
+
+Without a selector, no additional setup occurs unless `visible_devices_all_as_default`
+is enabled. That option is also bounded by the authorized device set.
+Explicit IDs outside the allocation, duplicate selector keys, malformed selectors,
+and conflicting device/module/PCI selections fail container creation.
 
 
 ### `HABANA_VISIBLE_MODULES` **Auto generated**
@@ -208,6 +203,33 @@ does not fail the pod creation in most cases, so we propagate the error inside t
 ## Config
 
 See options [here](./packaging/config.toml)
+
+The default allocation-only policy applies to OCI and legacy modes. It matches
+host accelerator character-device major/minor identities against the original
+OCI device list and requires effective read/write cgroup access. Accelerator
+permissions are preserved, not upgraded. Associated network interfaces and,
+when `mount_uverbs=true`, RDMA devices are selected by the allocated accelerator's
+PCI identity. `mount_accelerators=false` alone is not an authorization policy.
+
+This policy trusts the container engine to construct device entries. Kubernetes
+admission must prevent ordinary workloads from injecting arbitrary host devices;
+neither environment values, pod annotations, container UID 0, nor capabilities
+establish an allocation. CDI mode leaves OCI modification to the CDI integration.
+
+For trusted standalone installations that intentionally permit environment-only
+device grants, a host administrator can opt in at the top level of
+`/etc/habana-container-runtime/config.toml`:
+
+```toml
+allow-env-device-requests = true
+```
+
+This compatibility option restores environment-driven host device selection and
+must not be enabled for an untrusted shared Kubernetes runtime. The older
+`accept-habana-visible-devices-envvar-when-unprivileged` option does not enable it.
+Upgrade the runtime, hook, and CLI together. Existing environment-only Docker
+commands must either explicitly grant devices as above or use this trusted
+standalone opt-in. Prefer a fully configured CDI deployment for Kubernetes.
 
 ## Issues and Contributing
 

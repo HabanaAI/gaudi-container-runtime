@@ -32,8 +32,9 @@ import (
 )
 
 var (
-	debugflag  = flag.Bool("debug", false, "enable debug output")
-	configflag = flag.String("config", "", "configuration file")
+	debugflag   = flag.Bool("debug", false, "enable debug output")
+	configflag  = flag.String("config", "", "configuration file")
+	devicesflag = flag.String("devices", "", "explicit runtime-selected accelerator IDs")
 
 	defaultPATH = []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
 )
@@ -127,12 +128,9 @@ func doHook(lifecycle string) {
 	if cli.LogFile != "" {
 		args = append(args, fmt.Sprintf("--log-file=%s", cli.LogFile))
 	}
-	if hook.MountAccelerators {
-		args = append(args, fmt.Sprintf("--mount-accelerators=%t", hook.MountAccelerators))
-	}
-	if hook.MountUverbs {
-		args = append(args, fmt.Sprintf("--mount-uverbs=%t", hook.MountUverbs))
-	}
+	mountAccelerators := hook.MountAccelerators && (hook.AllowEnvDeviceRequests || rt.Mode == ModeCDI)
+	args = append(args, fmt.Sprintf("--mount-accelerators=%t", mountAccelerators))
+	args = append(args, fmt.Sprintf("--mount-uverbs=%t", hook.MountUverbs))
 	if rt.Mode == ModeCDI {
 		args = append(args, "--cdi=true")
 	}

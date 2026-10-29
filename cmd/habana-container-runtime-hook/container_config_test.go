@@ -21,7 +21,46 @@ import (
 	"testing"
 
 	"github.com/HabanaAI/habana-container-runtime/internal/config"
+	"github.com/HabanaAI/habana-container-runtime/internal/discover"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
+
+func TestResolveHabanaConfigWithoutAllocation(t *testing.T) {
+	for _, explicit := range []string{"", "0", "all"} {
+		t.Run("explicit="+explicit, func(t *testing.T) {
+			hook := config.DefaultConfig()
+			hook.Runtime.AlwaysMount = true
+			spec := &specs.Spec{Process: &specs.Process{Env: []string{"HABANA_VISIBLE_DEVICES=all"}}}
+			got, err := resolveHabanaConfig(hook, spec, explicit)
+			if err != nil || got != nil {
+				t.Fatalf("unallocated hook = %v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestResolveHabanaConfigUsesExplicitDevices(t *testing.T) {
+	original := resolveDevices
+	t.Cleanup(func() { resolveDevices = original })
+	resolveDevices = func(spec *specs.Spec, allowEnvironment, alwaysMount bool) ([]string, error) {
+		if allowEnvironment {
+			t.Fatal("default hook allowed environment-only grants")
+		}
+		_, err := discover.SelectDevices(spec.Process.Env, []string{"10"}, alwaysMount)
+		return []string{"10"}, err
+	}
+	spec := &specs.Spec{Process: &specs.Process{Env: []string{"HABANA_VISIBLE_DEVICES=all", "HABANA_VISIBLE_MODULES=none"}}}
+	got, err := resolveHabanaConfig(config.DefaultConfig(), spec, "10")
+	if err != nil || got == nil || got.Devices != "10" {
+		t.Fatalf("explicit hook = %v, %v", got, err)
+	}
+	if _, err := resolveHabanaConfig(config.DefaultConfig(), spec, "0"); err == nil {
+		t.Fatal("hook accepted a device outside its allocation")
+	}
+	if spec.Process.Env[0] != "HABANA_VISIBLE_DEVICES=all" {
+		t.Fatal("hook changed the input environment")
+	}
+}
 
 func TestGetHabanaConfig(t *testing.T) {
 	tests := []struct {

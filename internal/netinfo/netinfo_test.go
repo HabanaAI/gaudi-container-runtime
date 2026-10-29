@@ -16,16 +16,19 @@
 package netinfo
 
 import (
+	"errors"
 	"io"
 	"io/fs"
 	"log"
 	"log/slog"
+	"net"
 	"os"
 	"path"
 	"testing"
 	"testing/fstest"
 
 	"github.com/google/go-cmp/cmp"
+	"golang.org/x/sys/unix"
 )
 
 func TestDeviceType(t *testing.T) {
@@ -355,6 +358,11 @@ func TestSymlinkCheck(t *testing.T) {
 	}
 	symlinkDirFile := path.Join(symlinkDir, "regular-file")
 
+	fifo := path.Join(subdir, "fifo")
+	if err := unix.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
 		name      string
 		filePath  string
@@ -380,6 +388,16 @@ func TestSymlinkCheck(t *testing.T) {
 			filePath:  symlinkDirFile,
 			expectErr: true,
 		},
+		{
+			name:      "FIFO should return an error",
+			filePath:  fifo,
+			expectErr: true,
+		},
+		{
+			name:      "directory should return an error",
+			filePath:  subdir,
+			expectErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -392,6 +410,210 @@ func TestSymlinkCheck(t *testing.T) {
 				t.Fatalf("expected no error, got: %v", err)
 			}
 		})
+	}
+}
+
+func TestSymlinkCheckCharacterDevice(t *testing.T) {
+	info, err := os.Lstat("/dev/null")
+	if err != nil {
+		t.Skipf("character device unavailable: %v", err)
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		t.Skip("/dev/null is not a character device")
+	}
+	if err := symlinkCheck("/dev/null"); err == nil {
+		t.Fatal("expected character device rejection")
+	}
+}
+
+func TestNetinfoRejectsUnsafePaths(t *testing.T) {
+	source := path.Join(t.TempDir(), "source.json")
+	if err := os.WriteFile(source, []byte(`{"routes":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	writers := []struct {
+		name  string
+		write func(string) error
+	}{
+		{"macAddrInfo.json", func(rootfs string) error { return Generate(nil, rootfs) }},
+		{"gaudinet.json", func(rootfs string) error { return GaudinetFile(logger, rootfs, source) }},
+	}
+	for _, writer := range writers {
+		for _, kind := range []string{"FIFO", "socket", "directory", "symlink", "character device", "block device", "etc symlink", "habanalabs symlink"} {
+			t.Run(writer.name+"/"+kind, func(t *testing.T) {
+				rootfs, err := os.MkdirTemp("", "netinfo-")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.RemoveAll(rootfs) })
+				outside := t.TempDir()
+				dirPath := path.Join(rootfs, "etc", "habanalabs")
+				if err := os.MkdirAll(dirPath, 0755); err != nil {
+					t.Fatal(err)
+				}
+				destination := path.Join(dirPath, writer.name)
+				switch kind {
+				case "FIFO":
+					err = unix.Mkfifo(destination, 0600)
+				case "socket":
+					var listener net.Listener
+					listener, err = net.Listen("unix", destination)
+					if err == nil {
+						t.Cleanup(func() { listener.Close() })
+					}
+				case "directory":
+					err = os.Mkdir(destination, 0755)
+				case "symlink":
+					err = os.Symlink(source, destination)
+				case "character device", "block device":
+					mode, device := uint32(unix.S_IFCHR|0600), unix.Mkdev(1, 7)
+					if kind == "block device" {
+						mode, device = unix.S_IFBLK|0600, unix.Mkdev(0, 0)
+					}
+					err = unix.Mknod(destination, mode, int(device))
+					if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+						t.Skipf("device creation unavailable: %v", err)
+					}
+				case "etc symlink", "habanalabs symlink":
+					if err := os.Remove(dirPath); err != nil {
+						t.Fatal(err)
+					}
+					if kind == "etc symlink" {
+						dirPath = path.Dir(dirPath)
+						if err := os.Remove(dirPath); err != nil {
+							t.Fatal(err)
+						}
+					}
+					err = os.Symlink(outside, dirPath)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := writer.write(rootfs); err == nil {
+					t.Fatal("expected unsafe path rejection")
+				}
+				entries, err := os.ReadDir(outside)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(entries) != 0 {
+					t.Fatalf("created entries outside rootfs: %v", entries)
+				}
+			})
+		}
+	}
+}
+
+func TestWriteNetinfoFile(t *testing.T) {
+	for _, name := range []string{"macAddrInfo.json", "gaudinet.json"} {
+		for _, scenario := range []string{"new", "hard link", "write failure", "existing FIFO", "symlink race", "FIFO race", "parent race"} {
+			t.Run(name+"/"+scenario, func(t *testing.T) {
+				rootfs := t.TempDir()
+				dir, err := openNetinfoDir(rootfs, name, 0755)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer dir.Close()
+				dirPath := path.Join(rootfs, "etc", "habanalabs")
+				destination := path.Join(dirPath, name)
+				outside := t.TempDir()
+				original := path.Join(outside, "original")
+				if err := os.WriteFile(original, []byte("original contents"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if scenario != "new" {
+					if err := os.Link(original, destination); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if scenario == "existing FIFO" {
+					if err := os.Remove(destination); err != nil {
+						t.Fatal(err)
+					}
+					if err := unix.Mkfifo(destination, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				writerCalled := false
+				err = writeNetinfoFile(dir, name, func(writer io.Writer) error {
+					writerCalled = true
+					switch scenario {
+					case "symlink race", "FIFO race":
+						if err := os.Remove(destination); err != nil {
+							t.Fatal(err)
+						}
+						if scenario == "symlink race" {
+							if err := os.Symlink(original, destination); err != nil {
+								t.Fatal(err)
+							}
+						} else if err := unix.Mkfifo(destination, 0600); err != nil {
+							t.Fatal(err)
+						}
+					case "parent race":
+						movedPath := path.Join(rootfs, "etc", "original")
+						if err := os.Rename(dirPath, movedPath); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(outside, dirPath); err != nil {
+							t.Fatal(err)
+						}
+						dirPath = movedPath
+						destination = path.Join(dirPath, name)
+					}
+					if _, err := io.WriteString(writer, "new contents"); err != nil {
+						return err
+					}
+					if scenario == "write failure" {
+						return io.ErrUnexpectedEOF
+					}
+					return nil
+				})
+				if scenario == "write failure" {
+					if !errors.Is(err, io.ErrUnexpectedEOF) {
+						t.Fatalf("expected write error, got %v", err)
+					}
+				} else if scenario == "existing FIFO" {
+					if err == nil || writerCalled {
+						t.Fatalf("expected rejection before writing, got %v", err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				content, err := os.ReadFile(original)
+				if err != nil || string(content) != "original contents" {
+					t.Fatalf("outside file modified: %q, %v", content, err)
+				}
+				if _, err := os.Lstat(path.Join(outside, name)); !os.IsNotExist(err) {
+					t.Fatalf("unexpected output outside rootfs: %v", err)
+				}
+				entries, err := os.ReadDir(dirPath)
+				if err != nil || len(entries) != 1 || entries[0].Name() != name {
+					t.Fatalf("unexpected output directory contents: %v, %v", entries, err)
+				}
+				info, err := os.Lstat(destination)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "existing FIFO" {
+					if info.Mode()&os.ModeNamedPipe == 0 {
+						t.Fatal("FIFO was modified")
+					}
+					return
+				}
+				if !info.Mode().IsRegular() {
+					t.Fatalf("output is not regular: %v", info.Mode())
+				}
+				want := "new contents"
+				if scenario == "write failure" {
+					want = "original contents"
+				}
+				content, err = os.ReadFile(destination)
+				if err != nil || string(content) != want {
+					t.Fatalf("output contents: got %q, want %q, error %v", content, want, err)
+				}
+			})
+		}
 	}
 }
 

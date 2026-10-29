@@ -46,11 +46,11 @@ const (
 )
 
 var (
-	osReadDir    = os.ReadDir
-	execRunc     = execRuncFunc
-	execLookPath = exec.LookPath
-	osStat       = os.Stat
-	osExecutable = os.Executable
+	execRunc       = execRuncFunc
+	resolveDevices = discover.ResolveDevices
+	execLookPath   = exec.LookPath
+	osStat         = os.Stat
+	osExecutable   = os.Executable
 )
 
 func main() {
@@ -81,13 +81,14 @@ func main() {
 		if err != nil {
 			log.Printf("failed to write error to stderr: %v", err)
 		}
+		os.Exit(1)
 	}
 }
 
 func run(logger *slog.Logger, cfg *config.Config, args []string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = r.(error)
+			err = fmt.Errorf("runtime panic: %v", r)
 			return
 		}
 	}()
@@ -132,50 +133,37 @@ func handleRequest(logger *slog.Logger, cfg *config.Config, args []string) error
 	if err != nil {
 		return fmt.Errorf("loading specs: %w", err)
 	}
-	defer func() {
-		err = saveSpecs(bundleConfigFile, specConfig)
-		if err != nil {
-			logger.Error(err.Error())
-		}
-	}()
-
-	// If user didn't ask specifically for always trying to mount the devices
-	// to each container, skip. This keeps the environment and runtime flow cleaner,
-	// and skips containers that do not asked for devices.
-	if !cfg.Runtime.AlwaysMount && !IsHabanaContainer(specConfig) {
+	requestedDevices, err := resolveDevices(specConfig, cfg.AllowEnvDeviceRequests, cfg.Runtime.AlwaysMount)
+	if err != nil {
+		return fmt.Errorf("authorizing Habana devices: %w", err)
+	}
+	if len(requestedDevices) == 0 {
 		return nil
+	}
+	if specConfig.Root == nil || specConfig.Root.Path == "" {
+		return fmt.Errorf("OCI root filesystem is missing")
+	}
+	if specConfig.Linux == nil {
+		specConfig.Linux = &specs.Linux{}
+	}
+	if specConfig.Linux.Resources == nil {
+		specConfig.Linux.Resources = &specs.LinuxResources{}
 	}
 
 	// If legacy mode, add habana-hook as a prestart hook, and return to
 	// execute runc. The hook and libhabana takes cares of the devices mounts.
 	if cfg.Runtime.Mode == config.ModeLegacy {
 		logger.Info("In legacy mode")
-		err = addPrestartHook(logger, specConfig, cfg)
+		err = addPrestartHook(logger, specConfig, cfg, requestedDevices)
 		if err != nil {
 			return fmt.Errorf("adding habana prestart hook: %s", err)
 		}
-		return nil
+		return saveSpecs(bundleConfigFile, specConfig)
 	}
 
-	// Always add this hook to expose network interfaces information
-	// inside the container
-	err = addCreateRuntimeHook(logger, specConfig, cfg)
-	if err != nil {
-		return fmt.Errorf("adding createRuntime hook: %w", err)
-	}
-
-	// We get the available devices based on the user request. If requested device is not
-	// available, we'll return here and log the info. If the options is 'all' or not set,
-	// we get all the devices.
-	requestedDevices := discover.DevicesIDs(filterDevicesByENV(specConfig, discover.AcceleratorDevices()))
-	if len(requestedDevices) == 0 {
-		logger.Info("No habanalabs accelerators found")
-		addErrorEnvVar(specConfig, "no accelerators found")
-		return nil
-	}
 	logger.Debug("Requested devices", "devices", requestedDevices)
 
-	if cfg.MountAccelerators {
+	if cfg.AllowEnvDeviceRequests && cfg.MountAccelerators {
 		err = addAcceleratorDevices(logger, specConfig, requestedDevices)
 		if err != nil {
 			addErrorEnvVar(specConfig, err.Error())
@@ -190,11 +178,15 @@ func handleRequest(logger *slog.Logger, cfg *config.Config, args []string) error
 	}
 
 	if cfg.MountUverbs {
-		err = addUverbsDevices(logger, specConfig)
+		err = addUverbsDevices(logger, specConfig, requestedDevices)
 		if err != nil {
 			addErrorEnvVar(specConfig, err.Error())
 			return fmt.Errorf("adding uverb devices: %w", err)
 		}
+	}
+	err = addCreateRuntimeHook(logger, specConfig, cfg, requestedDevices)
+	if err != nil {
+		return fmt.Errorf("adding createRuntime hook: %w", err)
 	}
 
 	// Docker saves the abolute path while containerd mentions the folder name
@@ -216,7 +208,7 @@ func handleRequest(logger *slog.Logger, cfg *config.Config, args []string) error
 		logger.Error(fmt.Sprintf("generating gaudinet file failed: %v", err))
 	}
 
-	return nil
+	return saveSpecs(bundleConfigFile, specConfig)
 }
 
 func execRuncFunc(logger *slog.Logger, args []string, systemdCgroup bool) error {
@@ -252,10 +244,12 @@ func hasCreateCommand(args []string) bool {
 }
 
 func IsHabanaContainer(spec *specs.Spec) bool {
+	if spec.Process == nil {
+		return false
+	}
 	for _, ev := range spec.Process.Env {
-		if strings.HasPrefix(ev, EnvHLVisibleDevices) ||
-			strings.HasPrefix(ev, EnvHLVisibleModules) ||
-			strings.HasPrefix(ev, EnvHLVisiblePciBusIds) {
+		key, _, found := strings.Cut(ev, "=")
+		if found && (key == EnvHLVisibleDevices || key == EnvHLVisibleModules || key == EnvHLVisiblePciBusIds) {
 			return true
 		}
 	}

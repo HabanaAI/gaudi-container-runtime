@@ -25,8 +25,6 @@ import (
 	"os/exec"
 	"syscall"
 
-	"golang.org/x/exp/slices"
-
 	"github.com/HabanaAI/habana-container-runtime/internal/discover"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
@@ -39,7 +37,10 @@ func exposeInterfaces(logger *slog.Logger, pid int, requestedDevs []string) erro
 	logger.Debug("Found network namespace", "path", netNS)
 
 	// Filter network devices based on requested accelerators.
-	hlibDevices := filterDevicesByENV(requestedDevs, discover.InfinibandDevices())
+	hlibDevices, err := discover.InfinibandForAccelerators(requestedDevs, discover.InfinibandDevices())
+	if err != nil {
+		return err
+	}
 	logger.Info(
 		"Exposing interfaces for devices",
 		"requested_devices", requestedDevs,
@@ -217,23 +218,6 @@ func execute(command string) error {
 		return fmt.Errorf("command failed: %s", string(content))
 	}
 	return nil
-}
-
-func filterDevicesByENV(requestedDevs, devices []string) []string {
-	// Case when alwaysMatch is true, and user didn't provide the environment variable
-	if len(requestedDevs) == 0 {
-		return devices
-	}
-
-	var filteredDevices []string
-	for _, dev := range devices {
-		devID := string(dev[len(dev)-1])
-		if slices.Contains(requestedDevs, devID) {
-			filteredDevices = append(filteredDevices, dev)
-		}
-	}
-
-	return filteredDevices
 }
 
 var letters = []rune("abcdefghijflmnopqrstuvwxyz")

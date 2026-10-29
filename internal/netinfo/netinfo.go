@@ -16,6 +16,7 @@
 package netinfo
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,7 +28,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // hlsNumInterfaceByType hold the known number of network ports (internal+external)
@@ -62,20 +64,13 @@ func getDeviceTypeInterfacesCount(devType string) int {
 // Generates creates the mac address information for the requested accelerator devices,
 // and saves the file in the default location '/etc/habanalabs/macAddrInfo.json'.
 func Generate(devicesIDs []string, containerRootFS string) error {
-	basePath := path.Join(containerRootFS, "/etc/habanalabs/")
-	netFilePath := path.Join(basePath, "macAddrInfo.json")
-
-	if _, err := os.Stat(basePath); os.IsNotExist(err) {
-		if err := os.Mkdir(basePath, 0750); err != nil {
-			return err
-		}
-	}
-
-	if err := symlinkCheck(netFilePath); err != nil {
+	dir, err := openNetinfoDir(containerRootFS, "macAddrInfo.json", 0750)
+	if err != nil {
 		return err
 	}
+	defer dir.Close()
 
-	return collect(netFilePath, devicesIDs)
+	return collect(dir, devicesIDs)
 }
 
 func symlinkCheck(filePath string) error {
@@ -118,11 +113,72 @@ func symlinkCheck(filePath string) error {
 	if fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("the file %s is a symlink, which is not allowed", filePath)
 	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("the file %s is not a regular file", filePath)
+	}
 	return nil
 }
 
+func openNetinfoDir(containerRootFS, name string, mode uint32) (*os.File, error) {
+	if err := symlinkCheck(path.Join(containerRootFS, "etc", "habanalabs", name)); err != nil {
+		return nil, err
+	}
+
+	dir, err := os.OpenFile(containerRootFS, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	for _, component := range []string{"etc", "habanalabs"} {
+		flags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+		fd, err := unix.Openat(int(dir.Fd()), component, flags, 0)
+		if errors.Is(err, unix.ENOENT) {
+			if err := unix.Mkdirat(int(dir.Fd()), component, mode); err != nil && !errors.Is(err, unix.EEXIST) {
+				dir.Close()
+				return nil, err
+			}
+			fd, err = unix.Openat(int(dir.Fd()), component, flags, 0)
+		}
+		dir.Close()
+		if err != nil {
+			return nil, err
+		}
+		dir = os.NewFile(uintptr(fd), component)
+	}
+	return dir, nil
+}
+
+func writeNetinfoFile(dir *os.File, name string, write func(io.Writer) error) error {
+	dirFD := int(dir.Fd())
+	var stat unix.Stat_t
+	err := unix.Fstatat(dirFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW)
+	if err == nil {
+		if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+			return fmt.Errorf("the file %s is not a regular file", name)
+		}
+	} else if !errors.Is(err, unix.ENOENT) {
+		return err
+	}
+
+	tempName := "." + name + "-" + rand.Text()
+	fd, err := unix.Openat(dirFD, tempName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(fd), tempName)
+	defer file.Close()
+	defer unix.Unlinkat(dirFD, tempName, 0)
+
+	if err := write(file); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return unix.Renameat(dirFD, tempName, dirFD, name)
+}
+
 // collect gathers MAC address info about the requested accelerators IDs.
-func collect(netFilePath string, devicesIDs []string) error {
+func collect(dir *os.File, devicesIDs []string) error {
 	netData, err := netConfig(devicesIDs)
 	if err != nil {
 		return err
@@ -135,35 +191,17 @@ func collect(netFilePath string, devicesIDs []string) error {
 		// is to insert logic to parse the expected internal and external ports from
 		// a mask, and create the config accordinly. Only than the file info will be correct,
 		// otherwise we better error out when ext ports are disabled. related issue: SW-190964.
-		f, err := os.OpenFile(netFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
-		if err != nil {
-			if errors.Is(err, syscall.ELOOP) {
-				return fmt.Errorf("path %s is a symlink, which is not allowed", netFilePath)
-			}
-			return err
-		}
-		defer f.Close()
-
-		e := json.NewEncoder(f)
-		e.SetIndent("", "  ")
-		err = e.Encode(netData)
-		if err != nil {
-			return err
-		}
+		return writeNetinfoFile(dir, "macAddrInfo.json", func(writer io.Writer) error {
+			encoder := json.NewEncoder(writer)
+			encoder.SetIndent("", "  ")
+			return encoder.Encode(netData)
+		})
 	}
 
 	return nil
 }
 
 func GaudinetFile(logger *slog.Logger, containerRootFS, source string) error {
-	// Destination inside the container file system.
-	destFile := path.Join(containerRootFS, "etc", "habanalabs", "gaudinet.json")
-
-	err := os.MkdirAll(path.Dir(destFile), 0755)
-	if err != nil {
-		return fmt.Errorf("failed creating directory in container root fs: %w", err)
-	}
-
 	info, err := os.Stat(source)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -188,25 +226,16 @@ func GaudinetFile(logger *slog.Logger, containerRootFS, source string) error {
 	}
 	defer srcFile.Close()
 
-	if err := symlinkCheck(destFile); err != nil {
-		return err
-	}
-
-	dst, err := os.OpenFile(path.Clean(destFile), os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
-	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
-			return fmt.Errorf("destination %s is a symlink, which is not allowed", destFile)
-		}
-		return err
-	}
-	defer dst.Close()
-
-	_, err = io.Copy(dst, srcFile)
+	dir, err := openNetinfoDir(containerRootFS, "gaudinet.json", 0755)
 	if err != nil {
 		return err
 	}
+	defer dir.Close()
 
-	return nil
+	return writeNetinfoFile(dir, "gaudinet.json", func(writer io.Writer) error {
+		_, err := io.Copy(writer, srcFile)
+		return err
+	})
 }
 
 func netConfig(devices []string) (NetJSON, error) {
